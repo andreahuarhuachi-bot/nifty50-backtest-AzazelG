@@ -1,0 +1,526 @@
+"""
+NIFTY 50 Backtest Dashboard
+Uso: streamlit run app.py
+"""
+import warnings, math
+warnings.filterwarnings("ignore")
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import streamlit as st
+from scipy.stats import norm
+import io
+
+# ── PAGE CONFIG ──────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="NIFTY 50 Backtest Dashboard",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.markdown("""
+<style>
+.metric-card {
+    background: #1e1e2e; border-radius: 10px; padding: 16px;
+    text-align: center; border: 1px solid #333;
+}
+.metric-value { font-size: 1.8rem; font-weight: bold; }
+.metric-label { font-size: 0.85rem; color: #aaa; margin-top: 4px; }
+.positive { color: #00d26a; }
+.negative { color: #ff4b4b; }
+.neutral  { color: #ffd700; }
+</style>
+""", unsafe_allow_html=True)
+
+# ── CONSTANTS ─────────────────────────────────────────────────────────────────
+DATA_FILE = "NIFTY_50_Historical_28062019_to_28062026.xlsx"
+NIFTY_LOT_SIZE = 50
+
+# ── DATA & INDICATORS ─────────────────────────────────────────────────────────
+@st.cache_data
+def load_data():
+    df = pd.read_excel(DATA_FILE)
+    df.columns = [c.strip().upper().replace(" ", "_") for c in df.columns]
+    df["DATE"] = pd.to_datetime(df["DATE"], dayfirst=True)
+    df = df.sort_values("DATE").reset_index(drop=True)
+    for col in list(df.columns):
+        if "SHARES"   in col: df.rename(columns={col: "VOLUME"},   inplace=True)
+        if "TURNOVER" in col: df.rename(columns={col: "TURNOVER"}, inplace=True)
+    df["RETURNS"] = df["CLOSE"].pct_change()
+    return df
+
+def add_indicators(df, sma_fast, sma_slow, rsi_period, bb_period, bb_std,
+                   macd_fast, macd_slow, macd_sig):
+    c = df["CLOSE"]
+    df = df.copy()
+    df["SMA_FAST"] = c.rolling(sma_fast).mean()
+    df["SMA_SLOW"] = c.rolling(sma_slow).mean()
+    delta = c.diff()
+    gain  = delta.clip(lower=0).rolling(rsi_period).mean()
+    loss  = (-delta.clip(upper=0)).rolling(rsi_period).mean()
+    df["RSI"] = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+    bb_m = c.rolling(bb_period).mean()
+    bb_s = c.rolling(bb_period).std()
+    df["BB_MID"] = bb_m
+    df["BB_UP"]  = bb_m + bb_std * bb_s
+    df["BB_LOW"] = bb_m - bb_std * bb_s
+    ema_f = c.ewm(span=macd_fast, adjust=False).mean()
+    ema_s = c.ewm(span=macd_slow, adjust=False).mean()
+    df["MACD"]     = ema_f - ema_s
+    df["MACD_SIG"] = df["MACD"].ewm(span=macd_sig, adjust=False).mean()
+    hl  = df["HIGH"] - df["LOW"]
+    hpc = (df["HIGH"] - df["CLOSE"].shift()).abs()
+    lpc = (df["LOW"]  - df["CLOSE"].shift()).abs()
+    df["ATR"] = pd.concat([hl, hpc, lpc], axis=1).max(axis=1).rolling(14).mean()
+    return df
+
+# ── SIGNALS ───────────────────────────────────────────────────────────────────
+def sig_sma(df):
+    return (df["SMA_FAST"] > df["SMA_SLOW"]).astype(int).diff().fillna(0).astype(int)
+
+def sig_rsi(df, oversold, overbought):
+    s = pd.Series(0, index=df.index)
+    s[(df["RSI"] < oversold)   & (df["RSI"].shift() >= oversold)]   =  1
+    s[(df["RSI"] > overbought) & (df["RSI"].shift() <= overbought)]  = -1
+    return s
+
+def sig_bb(df):
+    s = pd.Series(0, index=df.index)
+    s[(df["CLOSE"] > df["BB_LOW"]) & (df["CLOSE"].shift() <= df["BB_LOW"])] =  1
+    s[(df["CLOSE"] < df["BB_UP"])  & (df["CLOSE"].shift() >= df["BB_UP"])]  = -1
+    return s
+
+def sig_macd(df):
+    return (df["MACD"] > df["MACD_SIG"]).astype(int).diff().fillna(0).astype(int)
+
+# ── BLACK-SCHOLES ─────────────────────────────────────────────────────────────
+def bs_price(S, K, T, r, sigma, opt="call"):
+    if T <= 0:
+        return max(0.0, (S-K) if opt=="call" else (K-S))
+    d1 = (math.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma*math.sqrt(T))
+    d2 = d1 - sigma*math.sqrt(T)
+    if opt == "call":
+        return S*norm.cdf(d1) - K*math.exp(-r*T)*norm.cdf(d2)
+    return K*math.exp(-r*T)*norm.cdf(-d2) - S*norm.cdf(-d1)
+
+def atm_strike(spot):
+    return round(spot / 50) * 50
+
+# ── BACKTEST ENGINE ───────────────────────────────────────────────────────────
+def run_backtest(df, signals, mode, initial_capital, futures_margin,
+                 option_iv, option_expiry_days, risk_free_rate,
+                 brokerage_pct, slippage_ticks, stop_loss_pct):
+
+    def ep(px, d=1): return px + d * slippage_ticks * 0.05
+    def br(n):       return n * brokerage_pct
+
+    cash = float(initial_capital)
+    pos = 0; entry_px = 0.0; qty = 0; opt_data = None
+    equity_curve = []
+    trades = []
+
+    for i in range(len(df)):
+        sig   = signals.iloc[i]
+        close = df["CLOSE"].iloc[i]
+        date  = df["DATE"].iloc[i]
+
+        # ── stop-loss check ──────────────────────────────────────────────────
+        if stop_loss_pct > 0 and pos != 0 and mode == "SPOT":
+            if pos == 1 and close < entry_px * (1 - stop_loss_pct/100):
+                ep2 = ep(close, -1)
+                pnl = (ep2 - entry_px)*qty - br(ep2*qty)
+                cash += qty*ep2 - br(ep2*qty)
+                trades.append({"date":date,"type":"STOP_LOSS","price":ep2,"qty":qty,"pnl":round(pnl,2)})
+                qty = 0; pos = 0
+            elif pos == -1 and close > entry_px * (1 + stop_loss_pct/100):
+                ep2 = ep(close, 1)
+                pnl = (entry_px - ep2)*qty - br(ep2*qty)
+                cash += entry_px*qty + pnl
+                trades.append({"date":date,"type":"STOP_LOSS","price":ep2,"qty":qty,"pnl":round(pnl,2)})
+                qty = 0; pos = 0
+
+        # ── SPOT ─────────────────────────────────────────────────────────────
+        if mode == "SPOT":
+            opnl = (close-entry_px)*qty if pos==1 else (entry_px-close)*qty if pos==-1 else 0
+            equity_curve.append(cash + max(0, opnl))
+            if sig == 1 and pos != 1:
+                if pos == -1:
+                    ep2 = ep(close,-1); pnl = (entry_px-ep2)*qty - br(ep2*qty)
+                    cash += entry_px*qty + pnl
+                    trades.append({"date":date,"type":"S_EXIT","price":ep2,"qty":qty,"pnl":round(pnl,2)}); qty=0
+                ep2 = ep(close,1); qty = int(cash//ep2)
+                if qty > 0:
+                    cash -= qty*ep2 + br(qty*ep2); pos=1; entry_px=ep2
+                    trades.append({"date":date,"type":"BUY","price":ep2,"qty":qty,"pnl":0})
+            elif sig == -1 and pos != -1:
+                if pos == 1:
+                    ep2 = ep(close,-1); pnl = (ep2-entry_px)*qty - br(ep2*qty)
+                    cash += qty*ep2 - br(ep2*qty)
+                    trades.append({"date":date,"type":"SELL","price":ep2,"qty":qty,"pnl":round(pnl,2)}); qty=0
+                ep2 = ep(close,-1); qty = int(cash//ep2)
+                if qty > 0:
+                    cash -= qty*ep2; pos=-1; entry_px=ep2
+                    trades.append({"date":date,"type":"S_ENTRY","price":ep2,"qty":qty,"pnl":0})
+
+        # ── FUTURE ───────────────────────────────────────────────────────────
+        elif mode == "FUTURE":
+            m1 = close * NIFTY_LOT_SIZE * futures_margin
+            ml = int(cash // m1) if m1 > 0 else 0
+            opnl = (close-entry_px)*qty*NIFTY_LOT_SIZE if pos==1 else \
+                   (entry_px-close)*qty*NIFTY_LOT_SIZE if pos==-1 else 0
+            equity_curve.append(max(0, cash + opnl))
+            if sig == 1 and pos != 1:
+                if pos == -1:
+                    ep2 = ep(close,-1)
+                    pnl = (entry_px-ep2)*qty*NIFTY_LOT_SIZE - br(ep2*qty*NIFTY_LOT_SIZE)
+                    cash += entry_px*NIFTY_LOT_SIZE*qty*futures_margin + pnl
+                    trades.append({"date":date,"type":"FUT_SE","price":ep2,"qty":qty,"pnl":round(pnl,2)}); qty=0
+                if ml > 0:
+                    ep2=ep(close,1); qty=ml
+                    cash -= qty*ep2*NIFTY_LOT_SIZE*futures_margin
+                    pos=1; entry_px=ep2
+                    trades.append({"date":date,"type":"FUT_BUY","price":ep2,"qty":qty,"pnl":0})
+            elif sig == -1 and pos != -1:
+                if pos == 1:
+                    ep2 = ep(close,-1)
+                    pnl = (ep2-entry_px)*qty*NIFTY_LOT_SIZE - br(ep2*qty*NIFTY_LOT_SIZE)
+                    cash += entry_px*NIFTY_LOT_SIZE*qty*futures_margin + pnl
+                    trades.append({"date":date,"type":"FUT_SELL","price":ep2,"qty":qty,"pnl":round(pnl,2)}); qty=0
+                if ml > 0:
+                    ep2=ep(close,-1); qty=ml
+                    cash -= qty*ep2*NIFTY_LOT_SIZE*futures_margin
+                    pos=-1; entry_px=ep2
+                    trades.append({"date":date,"type":"FUT_SS","price":ep2,"qty":qty,"pnl":0})
+
+        # ── OPTION ───────────────────────────────────────────────────────────
+        elif mode == "OPTION":
+            opt_val = 0.0
+            if opt_data:
+                dh = (date - opt_data["ed"]).days
+                Tr = max(0,(option_expiry_days-dh)/365)
+                opt_val = bs_price(close,opt_data["K"],Tr,risk_free_rate,option_iv,opt_data["ot"]) \
+                          * opt_data["lots"] * NIFTY_LOT_SIZE
+            equity_curve.append(cash + opt_val)
+            if opt_data:
+                dh = (date - opt_data["ed"]).days
+                Tr = max(0,(option_expiry_days-dh)/365)
+                cf = (sig==-1 and opt_data["ot"]=="call") or \
+                     (sig== 1 and opt_data["ot"]=="put")  or Tr<=(2/365)
+                if cf:
+                    xp = bs_price(close,opt_data["K"],Tr,risk_free_rate,option_iv,opt_data["ot"])
+                    pnl = (xp-opt_data["ep"])*opt_data["lots"]*NIFTY_LOT_SIZE - br(xp*opt_data["lots"]*NIFTY_LOT_SIZE)
+                    cash += opt_val
+                    trades.append({"date":date,"type":"OPT_EXIT","price":xp,"qty":opt_data["lots"],"pnl":round(pnl,2)})
+                    opt_data=None; pos=0
+            if opt_data is None and sig in (1,-1):
+                ot = "call" if sig==1 else "put"
+                K  = atm_strike(close)
+                T0 = option_expiry_days/365
+                ep2 = bs_price(close,K,T0,risk_free_rate,option_iv,ot)
+                lots = max(1, int(cash*0.2/(ep2*NIFTY_LOT_SIZE))) if ep2>0 else 0
+                if lots > 0:
+                    cost = lots*ep2*NIFTY_LOT_SIZE + br(lots*ep2*NIFTY_LOT_SIZE)
+                    if cash >= cost:
+                        cash -= cost
+                        opt_data = {"ed":date,"K":K,"ot":ot,"ep":ep2,"lots":lots}
+                        pos = 1 if sig==1 else -1
+                        trades.append({"date":date,"type":"OPT_BUY","price":ep2,"qty":lots,"pnl":0})
+
+    # force-close last bar
+    if len(df) > 0:
+        last_close = df["CLOSE"].iloc[-1]
+        last_date  = df["DATE"].iloc[-1]
+        if mode in ("SPOT","FUTURE") and pos != 0:
+            ep2 = ep(last_close, -1 if pos==1 else 1)
+            if mode == "SPOT":
+                pnl = (ep2-entry_px)*qty if pos==1 else (entry_px-ep2)*qty
+                pnl -= br(ep2*qty)
+                cash += qty*ep2 if pos==1 else entry_px*qty + pnl
+            else:
+                pnl = (ep2-entry_px)*qty*NIFTY_LOT_SIZE if pos==1 else (entry_px-ep2)*qty*NIFTY_LOT_SIZE
+                pnl -= br(ep2*qty*NIFTY_LOT_SIZE)
+                cash += entry_px*NIFTY_LOT_SIZE*qty*futures_margin + pnl
+            trades.append({"date":last_date,"type":"CLOSE_ALL","price":ep2,"qty":qty,"pnl":round(pnl,2)})
+            if equity_curve: equity_curve[-1] = max(0, cash)
+        elif mode == "OPTION" and opt_data:
+            dh = (last_date - opt_data["ed"]).days
+            Tr = max(0,(option_expiry_days-dh)/365)
+            xp = bs_price(last_close,opt_data["K"],Tr,risk_free_rate,option_iv,opt_data["ot"])
+            pnl = (xp-opt_data["ep"])*opt_data["lots"]*NIFTY_LOT_SIZE - br(xp*opt_data["lots"]*NIFTY_LOT_SIZE)
+            cash += xp*opt_data["lots"]*NIFTY_LOT_SIZE
+            trades.append({"date":last_date,"type":"OPT_CLOSE","price":xp,"qty":opt_data["lots"],"pnl":round(pnl,2)})
+            if equity_curve: equity_curve[-1] = max(0, cash)
+
+    return equity_curve, trades
+
+# ── METRICS ───────────────────────────────────────────────────────────────────
+def calc_metrics(equity_curve, trades_list, initial_capital, risk_free_rate):
+    eq  = np.array(equity_curve, dtype=float)
+    if len(eq) < 2:
+        return {}
+    ret   = np.diff(eq) / np.where(eq[:-1]==0, 1, eq[:-1])
+    years = len(eq) / 252
+    total_ret = (eq[-1] - initial_capital) / initial_capital * 100
+    cagr      = ((eq[-1]/initial_capital)**(1/years) - 1)*100 if years>0 and eq[-1]>0 else -100
+    dd        = eq / np.maximum.accumulate(np.where(eq==0,1e-9,eq)) - 1
+    max_dd    = dd.min() * 100
+    ann_ret   = ret.mean() * 252
+    ann_std   = ret.std()  * np.sqrt(252)
+    sharpe    = (ann_ret - risk_free_rate) / ann_std if ann_std > 0 else 0
+    down      = ret[ret < 0]
+    sortino   = (ann_ret - risk_free_rate) / (down.std()*np.sqrt(252)) if len(down)>0 and down.std()>0 else 0
+    td        = pd.DataFrame(trades_list)
+    pnls      = td[td["pnl"] != 0]["pnl"] if len(td)>0 else pd.Series(dtype=float)
+    nt        = len(pnls)
+    win_rate  = float((pnls > 0).sum()) / nt * 100 if nt > 0 else 0
+    gp = float(pnls[pnls>0].sum()); gl = abs(float(pnls[pnls<0].sum()))
+    pf = gp/gl if gl > 0 else float("inf")
+    avg_win  = float(pnls[pnls>0].mean()) if (pnls>0).any() else 0
+    avg_loss = float(pnls[pnls<0].mean()) if (pnls<0).any() else 0
+    return {
+        "final_equity": round(eq[-1],0), "total_ret": round(total_ret,2),
+        "cagr": round(cagr,2), "max_dd": round(max_dd,2),
+        "sharpe": round(sharpe,2), "sortino": round(sortino,2),
+        "num_trades": nt, "win_rate": round(win_rate,2),
+        "profit_factor": round(pf,2), "avg_win": round(avg_win,2),
+        "avg_loss": round(avg_loss,2),
+    }
+
+# ════════════════════════════════════════════════════════════════════════════
+#  STREAMLIT UI
+# ════════════════════════════════════════════════════════════════════════════
+st.title("📈 NIFTY 50 — Backtest Dashboard")
+st.caption("Prueba estrategias de trading con datos históricos reales 2019-2026")
+
+# ── SIDEBAR ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ Configuración")
+
+    st.subheader("💰 Capital")
+    initial_capital = st.number_input("Capital inicial (Rs)", 100_000, 10_000_000,
+                                       1_000_000, step=100_000,
+                                       help="Monto inicial de inversión en rupias")
+    stop_loss_pct = st.slider("Stop-Loss (%)", 0.0, 20.0, 5.0, 0.5,
+                               help="0 = sin stop-loss. Recomendado: 3-7%")
+
+    st.subheader("📊 Estrategia")
+    strategy = st.selectbox("Estrategia", ["SMA Crossover", "RSI Mean Reversion",
+                                             "Bollinger Bands", "MACD Signal"])
+    mode = st.selectbox("Instrumento", ["SPOT", "FUTURE", "OPTION"],
+                         help="SPOT=índice directo | FUTURE=apalancado | OPTION=prima BS")
+
+    st.subheader("📐 Parámetros de Indicadores")
+    if strategy == "SMA Crossover":
+        sma_fast = st.slider("SMA Rápida", 5, 50, 20)
+        sma_slow = st.slider("SMA Lenta",  20, 200, 50)
+        rsi_period=14; rsi_os=35; rsi_ob=65; bb_p=20; bb_s=2.0; mf=12; ms=26; mg=9
+    elif strategy == "RSI Mean Reversion":
+        rsi_period = st.slider("Período RSI", 5, 30, 14)
+        rsi_os     = st.slider("RSI Sobrevendido", 10, 45, 35)
+        rsi_ob     = st.slider("RSI Sobrecomprado", 55, 90, 65)
+        sma_fast=20; sma_slow=50; bb_p=20; bb_s=2.0; mf=12; ms=26; mg=9
+    elif strategy == "Bollinger Bands":
+        bb_p = st.slider("Período BB", 10, 50, 20)
+        bb_s = st.slider("Desviaciones estándar", 1.0, 3.0, 2.0, 0.1)
+        sma_fast=20; sma_slow=50; rsi_period=14; rsi_os=35; rsi_ob=65; mf=12; ms=26; mg=9
+    else:  # MACD
+        mf = st.slider("MACD Rápida EMA", 5, 20, 12)
+        ms = st.slider("MACD Lenta EMA",  15, 40, 26)
+        mg = st.slider("MACD Señal",       5, 15,  9)
+        sma_fast=20; sma_slow=50; rsi_period=14; rsi_os=35; rsi_ob=65; bb_p=20; bb_s=2.0
+
+    st.subheader("🔧 Parámetros F&O")
+    futures_margin     = st.slider("Margen Futuros (%)", 5, 30, 12) / 100
+    option_iv          = st.slider("IV Opciones (%)", 5, 50, 18) / 100
+    option_expiry_days = st.slider("Días a vencimiento (Opciones)", 7, 60, 25)
+    risk_free_rate     = st.slider("Tasa libre de riesgo (%)", 3.0, 10.0, 6.5) / 100
+    brokerage_pct      = st.slider("Comisión (%)", 0.01, 0.5, 0.03) / 100
+    slippage_ticks     = st.slider("Slippage (ticks)", 0, 10, 2)
+
+    st.subheader("📅 Período")
+    df_raw = load_data()
+    min_date = df_raw["DATE"].min().date()
+    max_date = df_raw["DATE"].max().date()
+    date_range = st.date_input("Rango de fechas",
+                                value=(min_date, max_date),
+                                min_value=min_date, max_value=max_date)
+    run_btn = st.button("▶ Ejecutar Backtest", type="primary", use_container_width=True)
+
+# ── MAIN PANEL ────────────────────────────────────────────────────────────────
+if run_btn or "bt_result" not in st.session_state:
+    if len(date_range) == 2:
+        start_d, end_d = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
+    else:
+        start_d, end_d = df_raw["DATE"].min(), df_raw["DATE"].max()
+
+    df_f = df_raw[(df_raw["DATE"] >= start_d) & (df_raw["DATE"] <= end_d)].reset_index(drop=True)
+    df_f = add_indicators(df_f, sma_fast, sma_slow, rsi_period, bb_p, bb_s, mf, ms, mg)
+
+    sig_map = {"SMA Crossover": sig_sma(df_f),
+               "RSI Mean Reversion": sig_rsi(df_f, rsi_os, rsi_ob),
+               "Bollinger Bands": sig_bb(df_f),
+               "MACD Signal": sig_macd(df_f)}
+    signals = sig_map[strategy]
+
+    with st.spinner("Calculando backtest..."):
+        eq_curve, trades_list = run_backtest(
+            df_f, signals, mode, initial_capital, futures_margin,
+            option_iv, option_expiry_days, risk_free_rate,
+            brokerage_pct, slippage_ticks, stop_loss_pct)
+        metrics = calc_metrics(eq_curve, trades_list, initial_capital, risk_free_rate)
+
+        # Buy & Hold benchmark
+        bh_eq = [initial_capital * (df_f["CLOSE"].iloc[i] / df_f["CLOSE"].iloc[0]) for i in range(len(df_f))]
+        bh_m  = calc_metrics(bh_eq, [], initial_capital, risk_free_rate)
+
+    st.session_state["bt_result"] = (df_f, eq_curve, trades_list, metrics, bh_eq, bh_m)
+
+df_f, eq_curve, trades_list, metrics, bh_eq, bh_m = st.session_state["bt_result"]
+
+# ── KPI CARDS ─────────────────────────────────────────────────────────────────
+st.subheader("📊 Resultados — {} [{}]".format(strategy, mode))
+
+c1,c2,c3,c4,c5,c6 = st.columns(6)
+def kpi(col, label, value, suffix="", good_if_positive=True):
+    try:    v = float(value)
+    except: v = 0
+    color = "positive" if (v > 0 and good_if_positive) or (v < 0 and not good_if_positive) else "negative"
+    if label in ("Capital Final","# Trades"): color = "neutral"
+    col.markdown("""<div class='metric-card'>
+        <div class='metric-value {c}'>{val}{s}</div>
+        <div class='metric-label'>{l}</div></div>""".format(
+        c=color, val=value, s=suffix, l=label), unsafe_allow_html=True)
+
+kpi(c1, "Capital Final",   "Rs {:,.0f}".format(metrics.get("final_equity",0)), good_if_positive=True)
+kpi(c2, "Retorno Total",   "{}%".format(metrics.get("total_ret",0)))
+kpi(c3, "CAGR",            "{}%".format(metrics.get("cagr",0)))
+kpi(c4, "Máx. Drawdown",   "{}%".format(metrics.get("max_dd",0)), good_if_positive=False)
+kpi(c5, "Sharpe Ratio",    metrics.get("sharpe",0))
+kpi(c6, "Win Rate",        "{}%".format(metrics.get("win_rate",0)))
+
+st.markdown("<br>", unsafe_allow_html=True)
+c7,c8,c9,c10 = st.columns(4)
+kpi(c7,  "# Trades",       metrics.get("num_trades",0))
+kpi(c8,  "Profit Factor",  metrics.get("profit_factor",0))
+kpi(c9,  "Ganancia Prom.", "Rs {:,.0f}".format(metrics.get("avg_win",0)))
+kpi(c10, "Pérdida Prom.",  "Rs {:,.0f}".format(metrics.get("avg_loss",0)), good_if_positive=False)
+
+st.markdown("---")
+
+# ── EQUITY CHART ──────────────────────────────────────────────────────────────
+tab1, tab2, tab3 = st.tabs(["📈 Equity & Drawdown", "🕯️ Precio & Señales", "📋 Log de Trades"])
+
+with tab1:
+    eq_arr = np.array(eq_curve, dtype=float)
+    dates  = df_f["DATE"].iloc[:len(eq_arr)]
+    dd_arr = eq_arr / np.maximum.accumulate(np.where(eq_arr==0,1e-9,eq_arr)) - 1
+
+    fig = make_subplots(rows=2, cols=1,
+                        shared_xaxes=True, row_heights=[0.65, 0.35],
+                        subplot_titles=["Equity (Rs)", "Drawdown (%)"])
+
+    fig.add_trace(go.Scatter(x=dates, y=eq_arr/1e5, name="Estrategia",
+                             line=dict(color="#00d26a", width=2)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_f["DATE"].iloc[:len(bh_eq)], y=np.array(bh_eq)/1e5,
+                             name="Buy & Hold", line=dict(color="#4da6ff", width=1.5, dash="dot")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=dd_arr*100, name="Drawdown",
+                             fill="tozeroy", fillcolor="rgba(255,75,75,0.2)",
+                             line=dict(color="rgba(255,75,75,0.8)", width=1)), row=2, col=1)
+
+    # trade markers
+    td = pd.DataFrame(trades_list)
+    if len(td) > 0:
+        buys  = td[td["type"].str.contains("BUY|ENTRY", na=False)]
+        sells = td[td["type"].str.contains("SELL|EXIT|STOP", na=False)]
+        for _, row in buys.iterrows():
+            idx = df_f[df_f["DATE"]==row["date"]].index
+            if len(idx)>0 and idx[0]<len(eq_arr):
+                fig.add_vline(x=row["date"], line_color="lime", line_width=0.8,
+                              line_dash="dot", opacity=0.6, row=1, col=1)
+        for _, row in sells.iterrows():
+            idx = df_f[df_f["DATE"]==row["date"]].index
+            if len(idx)>0 and idx[0]<len(eq_arr):
+                fig.add_vline(x=row["date"], line_color="red", line_width=0.8,
+                              line_dash="dot", opacity=0.6, row=1, col=1)
+
+    fig.update_layout(height=550, template="plotly_dark", showlegend=True,
+                      margin=dict(l=40,r=40,t=40,b=20),
+                      legend=dict(orientation="h", y=1.05))
+    fig.update_yaxes(title_text="Rs Lakh", row=1, col=1)
+    fig.update_yaxes(title_text="DD %",    row=2, col=1)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # benchmark comparison
+    st.markdown("**Comparación vs Buy & Hold:**")
+    comp_cols = st.columns(4)
+    comp_cols[0].metric("Retorno Estrategia", "{}%".format(metrics.get("total_ret",0)),
+                         delta="{}%".format(round(metrics.get("total_ret",0)-bh_m.get("total_ret",0),2)))
+    comp_cols[1].metric("CAGR Estrategia",    "{}%".format(metrics.get("cagr",0)),
+                         delta="{}%".format(round(metrics.get("cagr",0)-bh_m.get("cagr",0),2)))
+    comp_cols[2].metric("Sharpe Estrategia",   str(metrics.get("sharpe",0)),
+                         delta=str(round(metrics.get("sharpe",0)-bh_m.get("sharpe",0),2)))
+    comp_cols[3].metric("Max DD Estrategia",  "{}%".format(metrics.get("max_dd",0)),
+                         delta="{}%".format(round(metrics.get("max_dd",0)-bh_m.get("max_dd",0),2)),
+                         delta_color="inverse")
+
+with tab2:
+    fig2 = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.55,0.25,0.20],
+                         subplot_titles=["Precio NIFTY 50 + Señales", "RSI", "MACD"])
+    # Candlestick
+    fig2.add_trace(go.Candlestick(x=df_f["DATE"], open=df_f["OPEN"], high=df_f["HIGH"],
+                                   low=df_f["LOW"], close=df_f["CLOSE"], name="NIFTY 50",
+                                   increasing_line_color="#00d26a", decreasing_line_color="#ff4b4b"),
+                   row=1, col=1)
+    fig2.add_trace(go.Scatter(x=df_f["DATE"], y=df_f["SMA_FAST"], name="SMA Fast",
+                               line=dict(color="orange", width=1.2)), row=1, col=1)
+    fig2.add_trace(go.Scatter(x=df_f["DATE"], y=df_f["SMA_SLOW"], name="SMA Slow",
+                               line=dict(color="red", width=1.2)), row=1, col=1)
+    fig2.add_trace(go.Scatter(x=df_f["DATE"], y=df_f["BB_UP"], name="BB Up",
+                               line=dict(color="rgba(150,100,255,0.5)", width=1, dash="dot")), row=1, col=1)
+    fig2.add_trace(go.Scatter(x=df_f["DATE"], y=df_f["BB_LOW"], name="BB Low",
+                               line=dict(color="rgba(150,100,255,0.5)", width=1, dash="dot"),
+                               fill="tonexty", fillcolor="rgba(150,100,255,0.05)"), row=1, col=1)
+    # RSI
+    fig2.add_trace(go.Scatter(x=df_f["DATE"], y=df_f["RSI"], name="RSI",
+                               line=dict(color="#ffd700", width=1.2)), row=2, col=1)
+    fig2.add_hline(y=70, line_color="red",  line_dash="dash", line_width=0.8, row=2, col=1)
+    fig2.add_hline(y=30, line_color="lime", line_dash="dash", line_width=0.8, row=2, col=1)
+    # MACD
+    macd_color = ["#00d26a" if v>=0 else "#ff4b4b" for v in df_f["MACD"]-df_f["MACD_SIG"]]
+    fig2.add_trace(go.Bar(x=df_f["DATE"], y=df_f["MACD"]-df_f["MACD_SIG"],
+                           name="MACD Hist", marker_color=macd_color, opacity=0.7), row=3, col=1)
+    fig2.add_trace(go.Scatter(x=df_f["DATE"], y=df_f["MACD"], name="MACD",
+                               line=dict(color="#4da6ff", width=1)), row=3, col=1)
+    fig2.add_trace(go.Scatter(x=df_f["DATE"], y=df_f["MACD_SIG"], name="Signal",
+                               line=dict(color="orange", width=1)), row=3, col=1)
+
+    fig2.update_layout(height=650, template="plotly_dark", showlegend=True,
+                       xaxis_rangeslider_visible=False, margin=dict(l=40,r=40,t=40,b=20))
+    fig2.update_yaxes(range=[0,100], row=2, col=1)
+    st.plotly_chart(fig2, use_container_width=True)
+
+with tab3:
+    if trades_list:
+        td_df = pd.DataFrame(trades_list)
+        td_df["date"] = td_df["date"].dt.strftime("%Y-%m-%d")
+        td_df["pnl_color"] = td_df["pnl"].apply(lambda x: "🟢" if x>0 else ("🔴" if x<0 else "⚪"))
+        st.dataframe(td_df[["date","type","price","qty","pnl","pnl_color"]].rename(
+            columns={"date":"Fecha","type":"Tipo","price":"Precio","qty":"Cantidad",
+                     "pnl":"P&L (Rs)","pnl_color":""}),
+            use_container_width=True, height=400)
+
+        total_pnl = td_df["pnl"].sum()
+        st.markdown("**P&L Total de trades cerrados: Rs {:,.0f}**".format(total_pnl))
+
+        csv_buf = io.StringIO()
+        td_df.drop("pnl_color", axis=1).to_csv(csv_buf, index=False)
+        st.download_button("⬇️ Descargar Trade Log (CSV)", csv_buf.getvalue(),
+                            file_name="trade_log_{}_{}.csv".format(strategy.replace(" ","_"), mode),
+                            mime="text/csv")
+    else:
+        st.info("No se generaron trades con esta configuración.")
+
+st.markdown("---")
+st.caption("⚠️ Este dashboard es solo para fines educativos y de análisis. No constituye asesoramiento financiero.")
