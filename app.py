@@ -22,15 +22,20 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-.metric-card {
-    background: #1e1e2e; border-radius: 10px; padding: 16px;
-    text-align: center; border: 1px solid #333;
+/* ── responsive metrics ── */
+[data-testid="stMetric"] {
+    background: #1e1e2e;
+    border-radius: 10px;
+    padding: 12px 16px;
+    border: 1px solid #333;
 }
-.metric-value { font-size: 1.8rem; font-weight: bold; }
-.metric-label { font-size: 0.85rem; color: #aaa; margin-top: 4px; }
-.positive { color: #00d26a; }
-.negative { color: #ff4b4b; }
-.neutral  { color: #ffd700; }
+[data-testid="stMetricValue"] { font-size: 1.4rem !important; }
+[data-testid="stMetricLabel"] { font-size: 0.8rem !important; }
+/* mobile: stack sidebar */
+@media (max-width: 768px) {
+    [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
+    section[data-testid="stSidebar"] { min-width: 100% !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -379,33 +384,32 @@ if run_btn or "bt_result" not in st.session_state:
 
 df_f, eq_curve, trades_list, metrics, bh_eq, bh_m = st.session_state["bt_result"]
 
-# ── KPI CARDS ─────────────────────────────────────────────────────────────────
+# ── KPI CARDS (responsive: 3 cols) ───────────────────────────────────────────
 st.subheader("📊 Resultados — {} [{}]".format(strategy, mode))
 
-c1,c2,c3,c4,c5,c6 = st.columns(6)
-def kpi(col, label, value, suffix="", good_if_positive=True):
-    try:    v = float(value)
-    except: v = 0
-    color = "positive" if (v > 0 and good_if_positive) or (v < 0 and not good_if_positive) else "negative"
-    if label in ("Capital Final","# Trades"): color = "neutral"
-    col.markdown("""<div class='metric-card'>
-        <div class='metric-value {c}'>{val}{s}</div>
-        <div class='metric-label'>{l}</div></div>""".format(
-        c=color, val=value, s=suffix, l=label), unsafe_allow_html=True)
+r1c1, r1c2, r1c3 = st.columns(3)
+fin_eq = metrics.get("final_equity", 0)
+tot_ret = metrics.get("total_ret", 0)
+cagr_v  = metrics.get("cagr", 0)
+r1c1.metric("💰 Capital Final",  "Rs {:,.0f}".format(fin_eq),
+             delta="Rs {:,.0f}".format(fin_eq - initial_capital))
+r1c2.metric("📈 Retorno Total",  "{}%".format(tot_ret),
+             delta="{}% vs B&H {}%".format(tot_ret, bh_m.get("total_ret",0)))
+r1c3.metric("🚀 CAGR Anual",     "{}%".format(cagr_v),
+             delta="{}% vs B&H {}%".format(cagr_v, bh_m.get("cagr",0)))
 
-kpi(c1, "Capital Final",   "Rs {:,.0f}".format(metrics.get("final_equity",0)), good_if_positive=True)
-kpi(c2, "Retorno Total",   "{}%".format(metrics.get("total_ret",0)))
-kpi(c3, "CAGR",            "{}%".format(metrics.get("cagr",0)))
-kpi(c4, "Máx. Drawdown",   "{}%".format(metrics.get("max_dd",0)), good_if_positive=False)
-kpi(c5, "Sharpe Ratio",    metrics.get("sharpe",0))
-kpi(c6, "Win Rate",        "{}%".format(metrics.get("win_rate",0)))
+r2c1, r2c2, r2c3 = st.columns(3)
+r2c1.metric("📉 Máx. Drawdown",  "{}%".format(metrics.get("max_dd",0)),
+             delta=None)
+r2c2.metric("⚡ Sharpe Ratio",   str(metrics.get("sharpe",0)),
+             delta=str(round(metrics.get("sharpe",0) - bh_m.get("sharpe",0), 2)))
+r2c3.metric("🎯 Win Rate",       "{}%".format(metrics.get("win_rate",0)),
+             delta=None)
 
-st.markdown("<br>", unsafe_allow_html=True)
-c7,c8,c9,c10 = st.columns(4)
-kpi(c7,  "# Trades",       metrics.get("num_trades",0))
-kpi(c8,  "Profit Factor",  metrics.get("profit_factor",0))
-kpi(c9,  "Ganancia Prom.", "Rs {:,.0f}".format(metrics.get("avg_win",0)))
-kpi(c10, "Pérdida Prom.",  "Rs {:,.0f}".format(metrics.get("avg_loss",0)), good_if_positive=False)
+r3c1, r3c2, r3c3 = st.columns(3)
+r3c1.metric("🔢 # Trades",       str(metrics.get("num_trades",0)))
+r3c2.metric("💹 Profit Factor",  str(metrics.get("profit_factor",0)))
+r3c3.metric("⚖️ Sortino",        str(metrics.get("sortino",0)))
 
 st.markdown("---")
 
