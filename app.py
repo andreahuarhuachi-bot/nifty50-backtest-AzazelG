@@ -351,38 +351,138 @@ with st.sidebar:
     date_range = st.date_input("Rango de fechas",
                                 value=(min_date, max_date),
                                 min_value=min_date, max_value=max_date)
-    run_btn = st.button("▶ Ejecutar Backtest", type="primary", use_container_width=True)
-
 # ── MAIN PANEL ────────────────────────────────────────────────────────────────
-if run_btn or "bt_result" not in st.session_state:
-    if len(date_range) == 2:
-        start_d, end_d = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
-    else:
-        start_d, end_d = df_raw["DATE"].min(), df_raw["DATE"].max()
+if len(date_range) == 2:
+    start_d, end_d = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
+else:
+    start_d, end_d = df_raw["DATE"].min(), df_raw["DATE"].max()
 
-    df_f = df_raw[(df_raw["DATE"] >= start_d) & (df_raw["DATE"] <= end_d)].reset_index(drop=True)
-    df_f = add_indicators(df_f, sma_fast, sma_slow, rsi_period, bb_p, bb_s, mf, ms, mg)
+df_f = df_raw[(df_raw["DATE"] >= start_d) & (df_raw["DATE"] <= end_d)].reset_index(drop=True)
+df_f = add_indicators(df_f, sma_fast, sma_slow, rsi_period, bb_p, bb_s, mf, ms, mg)
 
-    sig_map = {"SMA Crossover": sig_sma(df_f),
-               "RSI Mean Reversion": sig_rsi(df_f, rsi_os, rsi_ob),
-               "Bollinger Bands": sig_bb(df_f),
-               "MACD Signal": sig_macd(df_f)}
-    signals = sig_map[strategy]
+sig_map = {"SMA Crossover": sig_sma(df_f),
+           "RSI Mean Reversion": sig_rsi(df_f, rsi_os, rsi_ob),
+           "Bollinger Bands": sig_bb(df_f),
+           "MACD Signal": sig_macd(df_f)}
+signals = sig_map[strategy]
 
-    with st.spinner("Calculando backtest..."):
-        eq_curve, trades_list = run_backtest(
-            df_f, signals, mode, initial_capital, futures_margin,
-            option_iv, option_expiry_days, risk_free_rate,
-            brokerage_pct, slippage_ticks, stop_loss_pct)
-        metrics = calc_metrics(eq_curve, trades_list, initial_capital, risk_free_rate)
+with st.spinner("Calculando..."):
+    eq_curve, trades_list = run_backtest(
+        df_f, signals, mode, initial_capital, futures_margin,
+        option_iv, option_expiry_days, risk_free_rate,
+        brokerage_pct, slippage_ticks, stop_loss_pct)
+    metrics = calc_metrics(eq_curve, trades_list, initial_capital, risk_free_rate)
+    bh_eq = [initial_capital * (df_f["CLOSE"].iloc[i] / df_f["CLOSE"].iloc[0]) for i in range(len(df_f))]
+    bh_m  = calc_metrics(bh_eq, [], initial_capital, risk_free_rate)
 
-        # Buy & Hold benchmark
-        bh_eq = [initial_capital * (df_f["CLOSE"].iloc[i] / df_f["CLOSE"].iloc[0]) for i in range(len(df_f))]
-        bh_m  = calc_metrics(bh_eq, [], initial_capital, risk_free_rate)
+# ── SEÑAL ACTUAL ──────────────────────────────────────────────────────────────
+st.markdown("---")
+last = df_f.iloc[-1]
+prev = df_f.iloc[-2] if len(df_f) > 1 else df_f.iloc[-1]
+last_date_str = last["DATE"].strftime("%d %b %Y")
+price_chg = ((last["CLOSE"] - prev["CLOSE"]) / prev["CLOSE"]) * 100
+atr_val   = last["ATR"] if not np.isnan(last["ATR"]) else last["CLOSE"] * 0.01
 
-    st.session_state["bt_result"] = (df_f, eq_curve, trades_list, metrics, bh_eq, bh_m)
+# Compute current signal for each strategy
+def current_signal(df, strat_name, ros=35, rob=65):
+    if strat_name == "SMA Crossover":
+        if df["SMA_FAST"].iloc[-1] > df["SMA_SLOW"].iloc[-1] and \
+           df["SMA_FAST"].iloc[-2] <= df["SMA_SLOW"].iloc[-2]:
+            return 1, "Cruce alcista reciente"
+        elif df["SMA_FAST"].iloc[-1] > df["SMA_SLOW"].iloc[-1]:
+            return 1, "Tendencia ALCISTA activa"
+        elif df["SMA_FAST"].iloc[-1] < df["SMA_SLOW"].iloc[-1]:
+            return -1, "Tendencia BAJISTA activa"
+        return 0, "Neutral"
+    elif strat_name == "RSI Mean Reversion":
+        rsi = df["RSI"].iloc[-1]
+        if rsi < ros:   return 1,  "RSI={:.1f} — Sobrevendido (compra)".format(rsi)
+        if rsi > rob:   return -1, "RSI={:.1f} — Sobrecomprado (venta)".format(rsi)
+        return 0, "RSI={:.1f} — Zona neutral".format(rsi)
+    elif strat_name == "Bollinger Bands":
+        c = df["CLOSE"].iloc[-1]
+        if c <= df["BB_LOW"].iloc[-1]:  return 1,  "Precio en banda inferior (rebote)"
+        if c >= df["BB_UP"].iloc[-1]:   return -1, "Precio en banda superior (corrección)"
+        pct = (c - df["BB_LOW"].iloc[-1]) / (df["BB_UP"].iloc[-1] - df["BB_LOW"].iloc[-1]) * 100
+        return 0, "Precio al {:.0f}% dentro de las bandas".format(pct)
+    elif strat_name == "MACD Signal":
+        if df["MACD"].iloc[-1] > df["MACD_SIG"].iloc[-1] and \
+           df["MACD"].iloc[-2] <= df["MACD_SIG"].iloc[-2]:
+            return 1,  "Cruce MACD alcista reciente"
+        elif df["MACD"].iloc[-1] > df["MACD_SIG"].iloc[-1]:
+            return 1,  "MACD por encima de señal (alcista)"
+        elif df["MACD"].iloc[-1] < df["MACD_SIG"].iloc[-1]:
+            return -1, "MACD por debajo de señal (bajista)"
+        return 0, "MACD neutral"
+    return 0, "Neutral"
 
-df_f, eq_curve, trades_list, metrics, bh_eq, bh_m = st.session_state["bt_result"]
+strategies_all = ["SMA Crossover", "RSI Mean Reversion", "Bollinger Bands", "MACD Signal"]
+all_signals = []
+for s in strategies_all:
+    ros_v = rsi_os if s == "RSI Mean Reversion" else 35
+    rob_v = rsi_ob if s == "RSI Mean Reversion" else 65
+    sv, desc = current_signal(df_f, s, ros_v, rob_v)
+    all_signals.append((s, sv, desc))
+
+buy_count  = sum(1 for _, sv, _ in all_signals if sv == 1)
+sell_count = sum(1 for _, sv, _ in all_signals if sv == -1)
+consensus  = "🟢 COMPRAR" if buy_count >= 3 else \
+             "🔴 VENDER"  if sell_count >= 3 else \
+             "🟡 ESPERAR" if buy_count > sell_count else \
+             "🟡 ESPERAR"
+
+# SL/TP based on ATR
+sl_price = round(last["CLOSE"] - 2 * atr_val, 2)
+tp_price = round(last["CLOSE"] + 3 * atr_val, 2)
+sl_pct   = round(2 * atr_val / last["CLOSE"] * 100, 2)
+tp_pct   = round(3 * atr_val / last["CLOSE"] * 100, 2)
+
+# Support/Resistance (20-day high/low)
+recent = df_f.tail(20)
+support    = round(recent["LOW"].min(), 2)
+resistance = round(recent["HIGH"].max(), 2)
+
+st.subheader("📡 Señal Actual — {}".format(last_date_str))
+
+# Price ticker
+pc1, pc2, pc3, pc4 = st.columns(4)
+pc1.metric("💹 NIFTY 50", "{:,.2f}".format(last["CLOSE"]),
+            delta="{:+.2f}%".format(price_chg))
+pc2.metric("📊 RSI (14)", "{:.1f}".format(last["RSI"]) if not np.isnan(last["RSI"]) else "—")
+pc3.metric("🔺 Resistencia (20d)", "{:,.2f}".format(resistance))
+pc4.metric("🔻 Soporte (20d)",     "{:,.2f}".format(support))
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# Signal cards for all strategies
+sig_cols = st.columns(4)
+icons = {1: "🟢", -1: "🔴", 0: "⚪"}
+labels = {1: "COMPRAR", -1: "VENDER", 0: "NEUTRAL"}
+for col, (sname, sv, desc) in zip(sig_cols, all_signals):
+    col.metric(
+        label="{} {}".format(icons[sv], sname),
+        value=labels[sv],
+        delta=desc,
+        delta_color="normal" if sv == 1 else ("inverse" if sv == -1 else "off")
+    )
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# Consensus + SL/TP
+con1, con2, con3, con4 = st.columns(4)
+con1.metric("🎯 Consenso ({}/4 estrategias)".format(max(buy_count, sell_count)),
+             consensus)
+con2.metric("🛑 Stop-Loss sugerido",
+             "Rs {:,.2f}".format(sl_price),
+             delta="-{}% (2×ATR)".format(sl_pct), delta_color="inverse")
+con3.metric("✅ Take-Profit sugerido",
+             "Rs {:,.2f}".format(tp_price),
+             delta="+{}% (3×ATR)".format(tp_pct))
+con4.metric("📐 ATR (volatilidad)",
+             "Rs {:.2f}".format(atr_val),
+             delta="{:.2f}% del precio".format(atr_val/last["CLOSE"]*100))
+
+st.markdown("---")
 
 # ── KPI CARDS (responsive: 3 cols) ───────────────────────────────────────────
 st.subheader("📊 Resultados — {} [{}]".format(strategy, mode))
