@@ -296,59 +296,59 @@ def calc_metrics(equity_curve, trades_list, initial_capital, risk_free_rate):
 # ════════════════════════════════════════════════════════════════════════════
 #  STREAMLIT UI
 # ════════════════════════════════════════════════════════════════════════════
-st.title("📈 NIFTY 50 — Backtest Dashboard")
-st.caption("Prueba estrategias de trading con datos históricos reales 2019-2026")
+st.title("📈 NIFTY 50 — Trading Signal Dashboard")
+st.caption("Based on 7 years of real NIFTY 50 data (2019–2026)")
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ Configuración")
+    st.header("⚙️ Settings")
 
-    st.subheader("💰 Capital")
-    initial_capital = st.number_input("Capital inicial (Rs)", 100_000, 10_000_000,
+    st.subheader("💰 Your Capital")
+    initial_capital = st.number_input("Starting Capital (Rs)", 100_000, 10_000_000,
                                        1_000_000, step=100_000,
-                                       help="Monto inicial de inversión en rupias")
+                                       help="How much money you want to trade with")
     stop_loss_pct = st.slider("Stop-Loss (%)", 0.0, 20.0, 5.0, 0.5,
-                               help="0 = sin stop-loss. Recomendado: 3-7%")
+                               help="Max loss before exiting a trade. Recommended: 3-7%")
 
-    st.subheader("📊 Estrategia")
-    strategy = st.selectbox("Estrategia", ["SMA Crossover", "RSI Mean Reversion",
-                                             "Bollinger Bands", "MACD Signal"])
-    mode = st.selectbox("Instrumento", ["SPOT", "FUTURE", "OPTION"],
-                         help="SPOT=índice directo | FUTURE=apalancado | OPTION=prima BS")
+    st.subheader("📊 Strategy")
+    strategy = st.selectbox("Strategy", ["SMA Crossover", "RSI Mean Reversion",
+                                          "Bollinger Bands", "MACD Signal"])
+    mode = st.selectbox("Instrument", ["SPOT", "FUTURE", "OPTION"],
+                         help="SPOT = buy/sell index directly | FUTURE = leveraged | OPTION = buy calls/puts")
 
-    st.subheader("📐 Parámetros de Indicadores")
+    st.subheader("📐 Indicator Settings")
     if strategy == "SMA Crossover":
-        sma_fast = st.slider("SMA Rápida", 5, 50, 20)
-        sma_slow = st.slider("SMA Lenta",  20, 200, 50)
+        sma_fast = st.slider("Fast MA (days)", 5, 50, 20)
+        sma_slow = st.slider("Slow MA (days)", 20, 200, 50)
         rsi_period=14; rsi_os=35; rsi_ob=65; bb_p=20; bb_s=2.0; mf=12; ms=26; mg=9
     elif strategy == "RSI Mean Reversion":
-        rsi_period = st.slider("Período RSI", 5, 30, 14)
-        rsi_os     = st.slider("RSI Sobrevendido", 10, 45, 35)
-        rsi_ob     = st.slider("RSI Sobrecomprado", 55, 90, 65)
+        rsi_period = st.slider("RSI Period", 5, 30, 14)
+        rsi_os     = st.slider("Oversold level (buy below)", 10, 45, 35)
+        rsi_ob     = st.slider("Overbought level (sell above)", 55, 90, 65)
         sma_fast=20; sma_slow=50; bb_p=20; bb_s=2.0; mf=12; ms=26; mg=9
     elif strategy == "Bollinger Bands":
-        bb_p = st.slider("Período BB", 10, 50, 20)
-        bb_s = st.slider("Desviaciones estándar", 1.0, 3.0, 2.0, 0.1)
+        bb_p = st.slider("BB Period", 10, 50, 20)
+        bb_s = st.slider("Band width", 1.0, 3.0, 2.0, 0.1)
         sma_fast=20; sma_slow=50; rsi_period=14; rsi_os=35; rsi_ob=65; mf=12; ms=26; mg=9
-    else:  # MACD
-        mf = st.slider("MACD Rápida EMA", 5, 20, 12)
-        ms = st.slider("MACD Lenta EMA",  15, 40, 26)
-        mg = st.slider("MACD Señal",       5, 15,  9)
+    else:
+        mf = st.slider("MACD Fast EMA", 5, 20, 12)
+        ms = st.slider("MACD Slow EMA", 15, 40, 26)
+        mg = st.slider("MACD Signal",    5, 15,  9)
         sma_fast=20; sma_slow=50; rsi_period=14; rsi_os=35; rsi_ob=65; bb_p=20; bb_s=2.0
 
-    st.subheader("🔧 Parámetros F&O")
-    futures_margin     = st.slider("Margen Futuros (%)", 5, 30, 12) / 100
-    option_iv          = st.slider("IV Opciones (%)", 5, 50, 18) / 100
-    option_expiry_days = st.slider("Días a vencimiento (Opciones)", 7, 60, 25)
-    risk_free_rate     = st.slider("Tasa libre de riesgo (%)", 3.0, 10.0, 6.5) / 100
-    brokerage_pct      = st.slider("Comisión (%)", 0.01, 0.5, 0.03) / 100
-    slippage_ticks     = st.slider("Slippage (ticks)", 0, 10, 2)
+    with st.expander("⚙️ Advanced Settings"):
+        futures_margin     = st.slider("Futures Margin (%)", 5, 30, 12) / 100
+        option_iv          = st.slider("Options IV (%)", 5, 50, 18) / 100
+        option_expiry_days = st.slider("Days to Expiry (Options)", 7, 60, 25)
+        risk_free_rate     = st.slider("Risk-Free Rate (%)", 3.0, 10.0, 6.5) / 100
+        brokerage_pct      = st.slider("Brokerage (%)", 0.01, 0.5, 0.03) / 100
+        slippage_ticks     = st.slider("Slippage (ticks)", 0, 10, 2)
 
-    st.subheader("📅 Período")
+    st.subheader("📅 Date Range")
     df_raw = load_data()
     min_date = df_raw["DATE"].min().date()
     max_date = df_raw["DATE"].max().date()
-    date_range = st.date_input("Rango de fechas",
+    date_range = st.date_input("Select period",
                                 value=(min_date, max_date),
                                 min_value=min_date, max_value=max_date)
 # ── MAIN PANEL ────────────────────────────────────────────────────────────────
@@ -388,31 +388,31 @@ def current_signal(df, strat_name, ros=35, rob=65):
     if strat_name == "SMA Crossover":
         if df["SMA_FAST"].iloc[-1] > df["SMA_SLOW"].iloc[-1] and \
            df["SMA_FAST"].iloc[-2] <= df["SMA_SLOW"].iloc[-2]:
-            return 1, "Cruce alcista reciente"
+            return 1, "Fresh BUY crossover today"
         elif df["SMA_FAST"].iloc[-1] > df["SMA_SLOW"].iloc[-1]:
-            return 1, "Tendencia ALCISTA activa"
+            return 1, "Uptrend active — fast MA above slow MA"
         elif df["SMA_FAST"].iloc[-1] < df["SMA_SLOW"].iloc[-1]:
-            return -1, "Tendencia BAJISTA activa"
-        return 0, "Neutral"
+            return -1, "Downtrend active — fast MA below slow MA"
+        return 0, "No clear trend"
     elif strat_name == "RSI Mean Reversion":
         rsi = df["RSI"].iloc[-1]
-        if rsi < ros:   return 1,  "RSI={:.1f} — Sobrevendido (compra)".format(rsi)
-        if rsi > rob:   return -1, "RSI={:.1f} — Sobrecomprado (venta)".format(rsi)
-        return 0, "RSI={:.1f} — Zona neutral".format(rsi)
+        if rsi < ros:   return 1,  "RSI {:.0f} — Oversold → good time to BUY".format(rsi)
+        if rsi > rob:   return -1, "RSI {:.0f} — Overbought → consider SELLING".format(rsi)
+        return 0, "RSI {:.0f} — Neutral zone, wait".format(rsi)
     elif strat_name == "Bollinger Bands":
         c = df["CLOSE"].iloc[-1]
-        if c <= df["BB_LOW"].iloc[-1]:  return 1,  "Precio en banda inferior (rebote)"
-        if c >= df["BB_UP"].iloc[-1]:   return -1, "Precio en banda superior (corrección)"
+        if c <= df["BB_LOW"].iloc[-1]:  return 1,  "Price hit lower band → likely to bounce up"
+        if c >= df["BB_UP"].iloc[-1]:   return -1, "Price hit upper band → likely to pull back"
         pct = (c - df["BB_LOW"].iloc[-1]) / (df["BB_UP"].iloc[-1] - df["BB_LOW"].iloc[-1]) * 100
-        return 0, "Precio al {:.0f}% dentro de las bandas".format(pct)
+        return 0, "Price is {:.0f}% inside the bands — wait".format(pct)
     elif strat_name == "MACD Signal":
         if df["MACD"].iloc[-1] > df["MACD_SIG"].iloc[-1] and \
            df["MACD"].iloc[-2] <= df["MACD_SIG"].iloc[-2]:
-            return 1,  "Cruce MACD alcista reciente"
+            return 1,  "Fresh bullish MACD crossover today"
         elif df["MACD"].iloc[-1] > df["MACD_SIG"].iloc[-1]:
-            return 1,  "MACD por encima de señal (alcista)"
+            return 1,  "MACD above signal line — bullish"
         elif df["MACD"].iloc[-1] < df["MACD_SIG"].iloc[-1]:
-            return -1, "MACD por debajo de señal (bajista)"
+            return -1, "MACD below signal line — bearish"
         return 0, "MACD neutral"
     return 0, "Neutral"
 
@@ -426,10 +426,9 @@ for s in strategies_all:
 
 buy_count  = sum(1 for _, sv, _ in all_signals if sv == 1)
 sell_count = sum(1 for _, sv, _ in all_signals if sv == -1)
-consensus  = "🟢 COMPRAR" if buy_count >= 3 else \
-             "🔴 VENDER"  if sell_count >= 3 else \
-             "🟡 ESPERAR" if buy_count > sell_count else \
-             "🟡 ESPERAR"
+consensus  = "🟢 BUY"  if buy_count >= 3 else \
+             "🔴 SELL" if sell_count >= 3 else \
+             "🟡 WAIT"
 
 # SL/TP based on ATR
 sl_price = round(last["CLOSE"] - 2 * atr_val, 2)
@@ -442,22 +441,25 @@ recent = df_f.tail(20)
 support    = round(recent["LOW"].min(), 2)
 resistance = round(recent["HIGH"].max(), 2)
 
-st.subheader("📡 Señal Actual — {}".format(last_date_str))
+st.subheader("📡 TODAY'S SIGNAL — {}".format(last_date_str))
 
 # Price ticker
 pc1, pc2, pc3, pc4 = st.columns(4)
-pc1.metric("💹 NIFTY 50", "{:,.2f}".format(last["CLOSE"]),
-            delta="{:+.2f}%".format(price_chg))
-pc2.metric("📊 RSI (14)", "{:.1f}".format(last["RSI"]) if not np.isnan(last["RSI"]) else "—")
-pc3.metric("🔺 Resistencia (20d)", "{:,.2f}".format(resistance))
-pc4.metric("🔻 Soporte (20d)",     "{:,.2f}".format(support))
+pc1.metric("💹 NIFTY 50 Price", "{:,.2f}".format(last["CLOSE"]),
+            delta="{:+.2f}% today".format(price_chg))
+pc2.metric("📊 Momentum (RSI)", "{:.0f} / 100".format(last["RSI"]) if not np.isnan(last["RSI"]) else "—",
+            delta="Oversold <35  |  Overbought >65", delta_color="off")
+pc3.metric("🔺 Resistance (20-day high)", "{:,.2f}".format(resistance),
+            delta="Price ceiling — sell zone", delta_color="off")
+pc4.metric("🔻 Support (20-day low)", "{:,.2f}".format(support),
+            delta="Price floor — buy zone", delta_color="off")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# Signal cards for all strategies
+# Signal cards for all 4 strategies
 sig_cols = st.columns(4)
-icons = {1: "🟢", -1: "🔴", 0: "⚪"}
-labels = {1: "COMPRAR", -1: "VENDER", 0: "NEUTRAL"}
+icons  = {1: "🟢", -1: "🔴", 0: "⚪"}
+labels = {1: "BUY",   -1: "SELL",  0: "WAIT"}
 for col, (sname, sv, desc) in zip(sig_cols, all_signals):
     col.metric(
         label="{} {}".format(icons[sv], sname),
@@ -468,53 +470,60 @@ for col, (sname, sv, desc) in zip(sig_cols, all_signals):
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# Consensus + SL/TP
+# Big consensus box + SL/TP
 con1, con2, con3, con4 = st.columns(4)
-con1.metric("🎯 Consenso ({}/4 estrategias)".format(max(buy_count, sell_count)),
-             consensus)
-con2.metric("🛑 Stop-Loss sugerido",
-             "Rs {:,.2f}".format(sl_price),
-             delta="-{}% (2×ATR)".format(sl_pct), delta_color="inverse")
-con3.metric("✅ Take-Profit sugerido",
-             "Rs {:,.2f}".format(tp_price),
-             delta="+{}% (3×ATR)".format(tp_pct))
-con4.metric("📐 ATR (volatilidad)",
-             "Rs {:.2f}".format(atr_val),
-             delta="{:.2f}% del precio".format(atr_val/last["CLOSE"]*100))
+agree = max(buy_count, sell_count)
+con1.metric("🎯 OVERALL SIGNAL  ({}/4 agree)".format(agree), consensus,
+             delta="Based on all 4 strategies", delta_color="off")
+con2.metric("🛑 Stop-Loss  (exit if price drops here)",
+             "Rs {:,.0f}".format(sl_price),
+             delta="{}% below current price".format(sl_pct), delta_color="inverse")
+con3.metric("✅ Take-Profit  (exit when price reaches here)",
+             "Rs {:,.0f}".format(tp_price),
+             delta="{}% above current price".format(tp_pct))
+con4.metric("📐 Daily Volatility",
+             "±Rs {:.0f}".format(atr_val),
+             delta="Average daily price move", delta_color="off")
 
 st.markdown("---")
 
-# ── KPI CARDS (responsive: 3 cols) ───────────────────────────────────────────
-st.subheader("📊 Resultados — {} [{}]".format(strategy, mode))
+# ── BACKTEST RESULTS ──────────────────────────────────────────────────────────
+st.subheader("📊 Strategy Performance — {} [{}]".format(strategy, mode))
 
 r1c1, r1c2, r1c3 = st.columns(3)
-fin_eq = metrics.get("final_equity", 0)
+fin_eq  = metrics.get("final_equity", 0)
 tot_ret = metrics.get("total_ret", 0)
 cagr_v  = metrics.get("cagr", 0)
-r1c1.metric("💰 Capital Final",  "Rs {:,.0f}".format(fin_eq),
-             delta="Rs {:,.0f}".format(fin_eq - initial_capital))
-r1c2.metric("📈 Retorno Total",  "{}%".format(tot_ret),
-             delta="{}% vs B&H {}%".format(tot_ret, bh_m.get("total_ret",0)))
-r1c3.metric("🚀 CAGR Anual",     "{}%".format(cagr_v),
-             delta="{}% vs B&H {}%".format(cagr_v, bh_m.get("cagr",0)))
+r1c1.metric("💰 Final Capital",
+             "Rs {:,.0f}".format(fin_eq),
+             delta="Profit: Rs {:,.0f}".format(fin_eq - initial_capital))
+r1c2.metric("📈 Total Return",
+             "{}%".format(tot_ret),
+             delta="{:+.1f}% vs Buy&Hold".format(tot_ret - bh_m.get("total_ret",0)))
+r1c3.metric("🚀 Annual Return (CAGR)",
+             "{}% / year".format(cagr_v),
+             delta="{:+.1f}% vs Buy&Hold".format(cagr_v - bh_m.get("cagr",0)))
 
 r2c1, r2c2, r2c3 = st.columns(3)
-r2c1.metric("📉 Máx. Drawdown",  "{}%".format(metrics.get("max_dd",0)),
-             delta=None)
-r2c2.metric("⚡ Sharpe Ratio",   str(metrics.get("sharpe",0)),
-             delta=str(round(metrics.get("sharpe",0) - bh_m.get("sharpe",0), 2)))
-r2c3.metric("🎯 Win Rate",       "{}%".format(metrics.get("win_rate",0)),
-             delta=None)
+r2c1.metric("📉 Worst Drawdown",  "{}%".format(metrics.get("max_dd",0)),
+             delta="Max loss from peak", delta_color="off")
+r2c2.metric("🎯 Win Rate",        "{}%".format(metrics.get("win_rate",0)),
+             delta="% of trades that made money", delta_color="off")
+r2c3.metric("💹 Profit Factor",   str(metrics.get("profit_factor",0)),
+             delta="Gains / Losses ratio (>1 is good)", delta_color="off")
 
 r3c1, r3c2, r3c3 = st.columns(3)
-r3c1.metric("🔢 # Trades",       str(metrics.get("num_trades",0)))
-r3c2.metric("💹 Profit Factor",  str(metrics.get("profit_factor",0)))
-r3c3.metric("⚖️ Sortino",        str(metrics.get("sortino",0)))
+r3c1.metric("🔢 Total Trades",    str(metrics.get("num_trades",0)),
+             delta="Number of buy/sell operations", delta_color="off")
+r3c2.metric("📊 Avg Winning Trade","Rs {:,.0f}".format(metrics.get("avg_win",0)),
+             delta="Average profit per winning trade", delta_color="off")
+r3c3.metric("📊 Avg Losing Trade", "Rs {:,.0f}".format(abs(metrics.get("avg_loss",0))),
+             delta="Average loss per losing trade", delta_color="off")
 
 st.markdown("---")
 
-# ── EQUITY CHART ──────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📈 Equity & Drawdown", "🕯️ Precio & Señales", "📋 Log de Trades"])
+# ── CHARTS & TRADE LOG ────────────────────────────────────────────────────────
+tab1, tab2, tab3 = st.tabs(["📈 Equity & Drawdown", "🕯️ Price Chart & Indicators", "📋 Trade History"])
 
 with tab1:
     eq_arr = np.array(eq_curve, dtype=float)
@@ -556,22 +565,21 @@ with tab1:
     fig.update_yaxes(title_text="DD %",    row=2, col=1)
     st.plotly_chart(fig, use_container_width=True)
 
-    # benchmark comparison
-    st.markdown("**Comparación vs Buy & Hold:**")
+    st.markdown("**vs Buy & Hold (just holding NIFTY 50):**")
     comp_cols = st.columns(4)
-    comp_cols[0].metric("Retorno Estrategia", "{}%".format(metrics.get("total_ret",0)),
-                         delta="{}%".format(round(metrics.get("total_ret",0)-bh_m.get("total_ret",0),2)))
-    comp_cols[1].metric("CAGR Estrategia",    "{}%".format(metrics.get("cagr",0)),
-                         delta="{}%".format(round(metrics.get("cagr",0)-bh_m.get("cagr",0),2)))
-    comp_cols[2].metric("Sharpe Estrategia",   str(metrics.get("sharpe",0)),
-                         delta=str(round(metrics.get("sharpe",0)-bh_m.get("sharpe",0),2)))
-    comp_cols[3].metric("Max DD Estrategia",  "{}%".format(metrics.get("max_dd",0)),
-                         delta="{}%".format(round(metrics.get("max_dd",0)-bh_m.get("max_dd",0),2)),
+    comp_cols[0].metric("Strategy Return",  "{}%".format(metrics.get("total_ret",0)),
+                         delta="{:+.1f}% vs B&H".format(metrics.get("total_ret",0)-bh_m.get("total_ret",0)))
+    comp_cols[1].metric("Strategy CAGR",    "{}%/yr".format(metrics.get("cagr",0)),
+                         delta="{:+.1f}% vs B&H".format(metrics.get("cagr",0)-bh_m.get("cagr",0)))
+    comp_cols[2].metric("Buy & Hold Return","{}%".format(bh_m.get("total_ret",0)),
+                         delta="Baseline — no trading at all", delta_color="off")
+    comp_cols[3].metric("Strategy Max Loss","{}%".format(metrics.get("max_dd",0)),
+                         delta="{:+.1f}% vs B&H".format(metrics.get("max_dd",0)-bh_m.get("max_dd",0)),
                          delta_color="inverse")
 
 with tab2:
     fig2 = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.55,0.25,0.20],
-                         subplot_titles=["Precio NIFTY 50 + Señales", "RSI", "MACD"])
+                         subplot_titles=["NIFTY 50 Price + Indicators", "RSI (Momentum)", "MACD (Trend)"])
     # Candlestick
     fig2.add_trace(go.Candlestick(x=df_f["DATE"], open=df_f["OPEN"], high=df_f["HIGH"],
                                    low=df_f["LOW"], close=df_f["CLOSE"], name="NIFTY 50",
@@ -609,22 +617,21 @@ with tab3:
     if trades_list:
         td_df = pd.DataFrame(trades_list)
         td_df["date"] = td_df["date"].dt.strftime("%Y-%m-%d")
-        td_df["pnl_color"] = td_df["pnl"].apply(lambda x: "🟢" if x>0 else ("🔴" if x<0 else "⚪"))
-        st.dataframe(td_df[["date","type","price","qty","pnl","pnl_color"]].rename(
-            columns={"date":"Fecha","type":"Tipo","price":"Precio","qty":"Cantidad",
-                     "pnl":"P&L (Rs)","pnl_color":""}),
+        td_df["result"] = td_df["pnl"].apply(lambda x: "WIN 🟢" if x>0 else ("LOSS 🔴" if x<0 else "—"))
+        st.dataframe(td_df[["date","type","price","qty","pnl","result"]].rename(
+            columns={"date":"Date","type":"Action","price":"Price (Rs)",
+                     "qty":"Quantity","pnl":"Profit/Loss (Rs)","result":"Result"}),
             use_container_width=True, height=400)
-
         total_pnl = td_df["pnl"].sum()
-        st.markdown("**P&L Total de trades cerrados: Rs {:,.0f}**".format(total_pnl))
-
+        color = "green" if total_pnl >= 0 else "red"
+        st.markdown("**Total Profit/Loss from closed trades: Rs {:,.0f}**".format(total_pnl))
         csv_buf = io.StringIO()
-        td_df.drop("pnl_color", axis=1).to_csv(csv_buf, index=False)
-        st.download_button("⬇️ Descargar Trade Log (CSV)", csv_buf.getvalue(),
-                            file_name="trade_log_{}_{}.csv".format(strategy.replace(" ","_"), mode),
+        td_df.drop("result", axis=1).to_csv(csv_buf, index=False)
+        st.download_button("⬇️ Download Trade History (CSV)", csv_buf.getvalue(),
+                            file_name="trades_{}_{}.csv".format(strategy.replace(" ","_"), mode),
                             mime="text/csv")
     else:
-        st.info("No se generaron trades con esta configuración.")
+        st.info("No trades were generated with this configuration.")
 
 st.markdown("---")
-st.caption("⚠️ Este dashboard es solo para fines educativos y de análisis. No constituye asesoramiento financiero.")
+st.caption("Disclaimer: This dashboard is for educational purposes only. Past performance does not guarantee future results.")
