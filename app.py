@@ -44,16 +44,46 @@ DATA_FILE = "NIFTY_50_Historical_28062019_to_28062026.xlsx"
 NIFTY_LOT_SIZE = 50
 
 # ── DATA & INDICATORS ─────────────────────────────────────────────────────────
-@st.cache_data
+@st.cache_data(ttl=3600)   # refresh every 1 hour
 def load_data():
-    df = pd.read_excel(DATA_FILE)
-    df.columns = [c.strip().upper().replace(" ", "_") for c in df.columns]
-    df["DATE"] = pd.to_datetime(df["DATE"], dayfirst=True)
-    df = df.sort_values("DATE").reset_index(drop=True)
-    for col in list(df.columns):
-        if "SHARES"   in col: df.rename(columns={col: "VOLUME"},   inplace=True)
-        if "TURNOVER" in col: df.rename(columns={col: "TURNOVER"}, inplace=True)
-    df["RETURNS"] = df["CLOSE"].pct_change()
+    """
+    Primary  : Yahoo Finance (^NSEI) — real data updated daily
+    Fallback : local Excel file (if Yahoo is unavailable)
+    """
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker("^NSEI")
+        yf_df  = ticker.history(period="10y", interval="1d", auto_adjust=True)
+        if yf_df is None or len(yf_df) < 100:
+            raise ValueError("Not enough data from Yahoo Finance")
+        yf_df = yf_df.reset_index()
+        yf_df.columns = [c.upper() for c in yf_df.columns]
+        # Yahoo returns 'DATE' as timezone-aware; strip timezone
+        if hasattr(yf_df["DATE"].dtype, "tz") or str(yf_df["DATE"].dtype) == "datetime64[ns, America/New_York]":
+            yf_df["DATE"] = yf_df["DATE"].dt.tz_localize(None)
+        yf_df["DATE"] = pd.to_datetime(yf_df["DATE"])
+        # Keep only needed columns
+        for col in ["DIVIDENDS", "STOCK SPLITS", "CAPITAL GAINS"]:
+            if col in yf_df.columns:
+                yf_df = yf_df.drop(columns=[col])
+        if "VOLUME" not in yf_df.columns:
+            yf_df["VOLUME"] = 0
+        df = yf_df[["DATE","OPEN","HIGH","LOW","CLOSE","VOLUME"]].copy()
+        df = df.sort_values("DATE").reset_index(drop=True)
+        df["RETURNS"] = df["CLOSE"].pct_change()
+        data_source = "📡 Live data — Yahoo Finance (^NSEI)"
+    except Exception as e:
+        # Fallback to local Excel
+        df = pd.read_excel(DATA_FILE)
+        df.columns = [c.strip().upper().replace(" ", "_") for c in df.columns]
+        df["DATE"] = pd.to_datetime(df["DATE"], dayfirst=True)
+        df = df.sort_values("DATE").reset_index(drop=True)
+        for col in list(df.columns):
+            if "SHARES"   in col: df.rename(columns={col: "VOLUME"},   inplace=True)
+            if "TURNOVER" in col: df.rename(columns={col: "TURNOVER"}, inplace=True)
+        df["RETURNS"] = df["CLOSE"].pct_change()
+        data_source = "📁 Local file (Yahoo Finance unavailable)"
+    df.attrs["source"] = data_source
     return df
 
 def add_indicators(df, sma_fast, sma_slow, rsi_period, bb_period, bb_std,
